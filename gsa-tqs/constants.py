@@ -31,7 +31,7 @@ class ModelConfig(TypedDict, total=False):
     use_layernorm: bool
     use_residuals: bool
     output_mode: str  # "polar" (alpha + phase) or "complex"
-    phase_init_zero: bool  # Whether to initialize phase head to 0.0
+    phase_init_zero: bool  # Whether to initialise phase head to 0.0
     relative_bias_init_std: float  # Std dev for relative bias embeddings
 
 
@@ -59,31 +59,13 @@ DEFAULT_MODEL_CONFIG: ModelConfig = {
     "relative_bias_init_std": 0.02,
 }
 
-# ===== Initialization Constants =====
-
 PHASE_INIT_VALUE: float = 0.0
-
 RELATIVE_BIAS_INIT_STD: float = 0.02
-"""Standard deviation for relative bias embedding initialization.
-Ensures attention softmax stays diffuse (not collapsed) at initialization."""
-
 AMPLITUDE_INIT_STD: float = 0.02
-"""Standard deviation for amplitude projection initialization."""
-
-# ===== Dimension Validation =====
 
 def validate_model_config(config: ModelConfig) -> None:
     """
     Validate model configuration for consistency and reasonableness.
-    
-    Checks:
-    - d_model is divisible by num_heads (for Q/K/V projections)
-    - d_k and d_v make sense relative to d_model
-    - num_layers >= 1
-    - phase_init_zero is only used for polar output_mode
-    
-    Raises:
-        ValueError: If configuration is invalid.
     """
     att = config.get("attention", {})
     d_model = att.get("d_model", 128)

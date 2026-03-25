@@ -1,12 +1,3 @@
-"""
-Group Self-Attention module for group equivariant networks (no einsum).
-
-Performs attention within the equivariant group representation while
-preserving the group structure.
-
-Module 3 from the architectural specification.
-"""
-
 import torch
 import torch.nn as nn
 import math

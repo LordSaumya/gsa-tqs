@@ -1,18 +1,11 @@
-"""
-Full Equivariant Transformer Model for Quantum State Encoding.
-
-Combines:
-1. LatticeBufferRegistry: Non-learnable geometric buffers
-2. LiftingAttention: Non-equivariant → equivariant
-3. Stack of GroupAttention layers: Equivariant → equivariant
-4. InvariantPoolAndOutput: Equivariant → amplitude + phase
-
-Module 5 from the architectural specification (model assembly).
-"""
-
 import torch
 import torch.nn as nn
 from typing import Tuple, Union, Dict, Any, Optional
+import sys
+import os
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from lattice_buffers import LatticeBufferRegistry
 from modules.lifting_attention import LiftingAttention
@@ -23,15 +16,6 @@ from modules.output_layer import InvariantPoolAndOutput
 class EquivariantTransformer(nn.Module):
     """
     Full group equivariant transformer for encoding quantum states.
-    
-    Architecture:
-    1. Lattice buffer registry: Manages spatial differences, group actions, multiplications
-    2. Lifting layer: Injects symmetry from point group into features
-    3. Equivariant attention layers: Multiple GroupAttention stacked
-    4. Output layer: Invariant pooling + polar/complex output
-    
-    Input: [B, n] raw quantum state indices
-    Output: [B] amplitudes and [B] phases, or [B] complex wavefunctions
     """
     
     def __init__(
@@ -47,18 +31,7 @@ class EquivariantTransformer(nn.Module):
         **lattice_kwargs,
     ):
         """
-        Initialize EquivariantTransformer.
-        
-        Args:
-            lattice_type: "1d_dihedral", "2d_square", etc.
-            num_sites: Number of spatial sites (n)
-            d_model: Feature dimension
-            num_layers: Number of equivariant attention layers
-            num_heads: Number of attention heads
-            output_mode: "polar" or "complex"
-            phase_init_zero: Whether to zero-initialize phase head (CRITICAL)
-            dropout: Dropout rate
-            **lattice_kwargs: Additional arguments for lattice (e.g., n=8 for 1d_dihedral)
+        Initialise EquivariantTransformer.
         """
         super().__init__()
         
@@ -68,7 +41,7 @@ class EquivariantTransformer(nn.Module):
         self.num_layers = num_layers
         self.output_mode = output_mode
         
-        # 1. Lattice buffer registry
+        # Lattice buffer registry
         self.lattice_registry = LatticeBufferRegistry(
             lattice_type=lattice_type,
             **{"n": num_sites, **lattice_kwargs}
@@ -79,7 +52,7 @@ class EquivariantTransformer(nn.Module):
         self.register_buffer("group_action_space", config["group_action_space"])
         self.register_buffer("group_mult", config["group_mult"])
         
-        # 2. Lifting layer: non-equivariant → equivariant
+        # Lifting layer
         self.lifting = LiftingAttention(
             d_model=d_model,
             num_heads=num_heads,
@@ -89,7 +62,7 @@ class EquivariantTransformer(nn.Module):
             d_hidden=d_model,
         )
         
-        # 3. Equivariant attention layers
+        # Equivariant attention layers
         self.attention_layers = nn.ModuleList([
             GroupAttention(
                 d_model=d_model,
@@ -101,7 +74,7 @@ class EquivariantTransformer(nn.Module):
             for _ in range(num_layers)
         ])
         
-        # 4. Output layer
+        # Output layer
         self.output_layer = InvariantPoolAndOutput(
             d_model=d_model,
             output_mode=output_mode,
@@ -115,52 +88,30 @@ class EquivariantTransformer(nn.Module):
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         """
         Forward pass through the full model.
-        
-        Args:
-            X: Either:
-               - Non-equivariant features [B, n, d_model] for direct input
-               - Raw indices [B, n] if state_indices=None (treated as one-hot embedding first)
-            state_indices: (Optional, unused) For future embedding from indices
-        
-        Returns:
-            If output_mode="polar": Tuple[amplitude [B], phase [B]]
-            If output_mode="complex": Complex tensor [B]
-        
-        Mathematical Flow:
-        1. Input [B, n, d_model] (assume already embedded if from indices)
-        2. Lifting: LiftingAttention → [B, n, |H|, d_model] (inject symmetry)
-        3. Attention: GroupAttention×num_layers → [B, n, |H|, d_model] (refine features)
-        4. Output: InvariantPoolAndOutput → (amplitude, phase) or wavefunction
         """
         # Ensure input is [B, n, d_model]
         if X.dim() == 2:
             # If [B, n], convert to [B, n, 1] and embed
             X = X.unsqueeze(-1).float()
-            X = torch.cat([X] * self.d_model, dim=-1)  # Simple embedding: repeat along feature dim
+            X = torch.cat([X] * self.d_model, dim=-1) 
         
-        # 1. Lifting: non-equivariant → equivariant
-        # [B, n, d_model] → [B, n, |H|, d_model]
+        # Lifting: non-equivariant -> equivariant
+        # [B, n, d_model] -> [B, n, |H|, d_model]
         X_eq = self.lifting(X, self.spatial_diff, self.group_action_space)
         
-        # 2. Equivariant attention layers
+        # Equivariant attention layers
         X_att = X_eq
         for layer in self.attention_layers:
             X_att = layer(X_att, self.spatial_diff, self.group_mult)
         
-        # 3. Invariant pooling + output
+        # Pooling + output
         output = self.output_layer(X_att)
         
         return output
     
-    def verify_initialization(self) -> Dict[str, Any]:
+    def verify_initialisation(self) -> Dict[str, Any]:
         """
-        Verify critical initialization constraints.
-        
-        Returns:
-            Dict with verification results:
-            - "phase_zeros": Phase head initialized to 0.0
-            - "buffers_persistent": Buffers are non-trainable
-            - "lattice_config": Lattice configuration summary
+        Verify critical initialisation constraints.
         """
         return {
             "phase_zeros": self.output_layer.verify_phase_init(),
@@ -169,7 +120,6 @@ class EquivariantTransformer(nn.Module):
             ),
             "lattice_config": self.lattice_registry.get_lattice_config(),
         }
-
 
 if __name__ == "__main__":
     print("Testing EquivariantTransformer...")
@@ -191,7 +141,7 @@ if __name__ == "__main__":
     )
     
     # Verify initialization
-    init_check = model.verify_initialization()
+    init_check = model.verify_initialisation()
     print(f"✓ Phase initialized to 0: {init_check['phase_zeros']}")
     print(f"✓ Buffers non-trainable: {init_check['buffers_persistent']}")
     print(f"✓ Lattice: {init_check['lattice_config']['lattice_type']}, "
