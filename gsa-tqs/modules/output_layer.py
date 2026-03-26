@@ -29,11 +29,11 @@ class InvariantPoolAndOutput(nn.Module):
             raise ValueError(f"Unrecognised output_mode: {output_mode}")
         
         # Amplitude projection head
-        self.W_alpha = nn.Linear(d_model, 1)
+        self.W_alpha = nn.Linear(d_model, 1, bias=False)
         self.b_alpha = nn.Parameter(torch.zeros(1))
         
         # Phase projection head
-        self.W_beta = nn.Linear(d_model, 1)
+        self.W_beta = nn.Linear(d_model, 1, bias=False)
         self.b_beta = nn.Parameter(torch.zeros(1))
         
         if phase_init_zero:
