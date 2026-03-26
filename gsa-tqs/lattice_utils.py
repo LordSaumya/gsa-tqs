@@ -15,10 +15,11 @@ def diff_tensor_1d(n: int) -> torch.Tensor:
 
 def diff_tensor_2d(x_num: int, y_num: int) -> torch.Tensor:
     """
-    Generate 2D periodic spatial difference matrix for a rectangular lattice. Element [i, j] = (dx, dy) where dx = (j_x - i_x) mod x_num, dy = (j_y - i_y) mod y_num.
+    Generate 2D periodic spatial difference matrix for a rectangular lattice.
+    Element [i, j] is a single integer index representing (dx, dy).
     """
     n_sites = x_num * y_num
-    spatial_diff_2d = torch.zeros((n_sites, n_sites, 2), dtype=torch.long)
+    spatial_diff_2d = torch.zeros((n_sites, n_sites), dtype=torch.long)
     
     for i in range(n_sites):
         i_x, i_y = i % x_num, i // x_num
@@ -26,8 +27,8 @@ def diff_tensor_2d(x_num: int, y_num: int) -> torch.Tensor:
             j_x, j_y = j % x_num, j // x_num
             dx = (j_x - i_x) % x_num
             dy = (j_y - i_y) % y_num
-            spatial_diff_2d[i, j] = torch.tensor([dx, dy], dtype=torch.long)
-    
+            spatial_diff_2d[i, j] = dy * x_num + dx # Single integer encoding of (dx, dy)
+            
     return spatial_diff_2d
 
 
