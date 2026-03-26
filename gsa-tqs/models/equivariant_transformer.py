@@ -1,11 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Tuple, Union, Dict, Any, Optional
-import sys
 import os
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from lattice_buffers import LatticeBufferRegistry
 from modules.lifting_attention import LiftingAttention
@@ -40,6 +36,7 @@ class EquivariantTransformer(nn.Module):
         self.d_model = d_model
         self.num_layers = num_layers
         self.output_mode = output_mode
+        self.state_embedding = nn.Linear(1, d_model)
         
         # Lattice buffer registry
         self.lattice_registry = LatticeBufferRegistry(
@@ -91,9 +88,8 @@ class EquivariantTransformer(nn.Module):
         """
         # Ensure input is [B, n, d_model]
         if X.dim() == 2:
-            # If [B, n], convert to [B, n, 1] and embed
             X = X.unsqueeze(-1).float()
-            X = torch.cat([X] * self.d_model, dim=-1) 
+            X = self.state_embedding(X) # [B, n, d_model]
         
         # Lifting: non-equivariant -> equivariant
         # [B, n, d_model] -> [B, n, |H|, d_model]
@@ -120,6 +116,7 @@ class EquivariantTransformer(nn.Module):
             ),
             "lattice_config": self.lattice_registry.get_lattice_config(),
         }
+
 
 if __name__ == "__main__":
     print("Testing EquivariantTransformer...")
