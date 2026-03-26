@@ -75,14 +75,13 @@ class InvariantPoolAndOutput(nn.Module):
         beta = beta.squeeze(-1)  # [B]
         
         if self.output_mode == "polar":
-            # Return as polar coordinates (amplitude, phase)
+            # Return as polar coordinates (log amplitude, phase)
             return alpha, beta
         elif self.output_mode == "complex":
-            # Convert to complex: r * exp(i*phi)
-            real_part = alpha * torch.cos(beta)
-            imag_part = alpha * torch.sin(beta)
-            return torch.complex(real_part, imag_part)
-    
+            amplitude = torch.exp(alpha)
+            # Return exp()
+            return torch.polar(amplitude, beta)
+
     def verify_phase_init(self) -> bool:
         """
         Verify that phase projection head is initialised to 0.0.
