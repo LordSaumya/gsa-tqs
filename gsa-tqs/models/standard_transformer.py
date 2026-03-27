@@ -33,6 +33,17 @@ class StandardTransformer(nn.Module):
         # Input embedding layer (same as EquivariantTransformer)
         self.state_embedding = nn.Linear(1, d_model)
         
+        # Absolute positional encoding
+        self.positional_encoding = nn.Parameter(torch.randn(1, num_sites, d_model))
+        
+        # Lifting attention layer (acts as parameter-equivalent for LiftingAttention)
+        self.lifting_attention = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        
         # Standard multi-head self-attention layers
         self.attention_layers = nn.ModuleList([
             nn.MultiheadAttention(
@@ -44,26 +55,11 @@ class StandardTransformer(nn.Module):
             for _ in range(num_layers)
         ])
         
-        # Feed-forward layers after each attention layer
-        d_ff = d_ff or 4 * d_model
-        self.feed_forward_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d_model, d_ff),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(d_ff, d_model),
-                nn.Dropout(dropout),
-            )
-            for _ in range(num_layers)
-        ])
-        
         # Layer normalisation
         self.layer_norms_attn = nn.ModuleList([
             nn.LayerNorm(d_model) for _ in range(num_layers)
         ])
-        self.layer_norms_ff = nn.ModuleList([
-            nn.LayerNorm(d_model) for _ in range(num_layers)
-        ])
+        self.layer_norm_lifting = nn.LayerNorm(d_model)
         
         # Output layer (same as EquivariantTransformer)
         self.output_layer = InvariantPoolAndOutput(
@@ -94,22 +90,23 @@ class StandardTransformer(nn.Module):
         # Embed input: [B, n, 1] -> [B, n, d_model]
         X = self.state_embedding(X)
         
+        # Add positional encoding
+        X = X + self.positional_encoding
+        
+        # Apply lifting attention
+        X_norm = self.layer_norm_lifting(X)
+        lifting_output, _ = self.lifting_attention(X_norm, X_norm, X_norm)
+        X = X + lifting_output  # Residual connection
+        
         # Standard transformer layers with residual connections
-        for attn_layer, ff_layer, ln_attn, ln_ff in zip(
+        for attn_layer, ln_attn in zip(
             self.attention_layers,
-            self.feed_forward_layers,
             self.layer_norms_attn,
-            self.layer_norms_ff,
         ):
             # Self-attention with pre-normalization (pre-LN transformer)
             X_norm = ln_attn(X)
             attn_output, _ = attn_layer(X_norm, X_norm, X_norm)
             X = X + attn_output  # Residual connection
-            
-            # Feed-forward with pre-normalization
-            X_norm = ln_ff(X)
-            ff_output = ff_layer(X_norm)
-            X = X + ff_output  # Residual connection
         
         # Pooling + output
         output = self.output_layer(X.unsqueeze(2))  # Add group dimension for compatibility
