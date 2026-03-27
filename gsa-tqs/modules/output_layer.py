@@ -36,6 +36,9 @@ class InvariantPoolAndOutput(nn.Module):
         self.W_beta = nn.Linear(d_model, 1, bias=False)
         self.b_beta = nn.Parameter(torch.zeros(1))
         
+        # Layer normalisation before projection (for numerical stability)
+        self.layernorm = nn.LayerNorm(d_model)
+        
         if phase_init_zero:
             self._initialise_phase_to_zero()
         else:
@@ -66,20 +69,24 @@ class InvariantPoolAndOutput(nn.Module):
         # Sum over sites and group elements
         h_pool = X.sum(dim=(1, 2))  # [B, d_model]
         
+        # Normalise pooled features for stability
+        h_pool = self.layernorm(h_pool)
+        
         # Amplitude projection
         alpha = self.W_alpha(h_pool) + self.b_alpha  # [B, 1]
         alpha = alpha.squeeze(-1)  # [B]
+        
+        # Clamp alpha to prevent exp overflow/underflow
+        alpha = torch.clamp(alpha, min=-20.0, max=20.0)
         
         # Phase projection
         beta = self.W_beta(h_pool) + self.b_beta  # [B, 1]
         beta = beta.squeeze(-1)  # [B]
         
         if self.output_mode == "polar":
-            # Return as polar coordinates (log amplitude, phase)
             return alpha, beta
         elif self.output_mode == "complex":
             amplitude = torch.exp(alpha)
-            # Return exp()
             return torch.polar(amplitude, beta)
 
     def verify_phase_init(self) -> bool:
