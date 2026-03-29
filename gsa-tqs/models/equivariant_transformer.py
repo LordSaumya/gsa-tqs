@@ -23,7 +23,7 @@ class EquivariantTransformer(nn.Module):
         num_heads: int = 4,
         output_mode: str = "polar",
         phase_init_zero: bool = True,
-        dropout: float = 0.1,
+        d_ff: Optional[int] = None,
         **lattice_kwargs,
     ):
         """
@@ -37,6 +37,9 @@ class EquivariantTransformer(nn.Module):
         self.num_layers = num_layers
         self.output_mode = output_mode
         self.state_embedding = nn.Linear(1, d_model)
+        
+        # Feedforward dimension
+        d_ff = d_ff or (4 * d_model)
         
         # Lattice buffer registry
         self.lattice_registry = LatticeBufferRegistry(
@@ -55,8 +58,15 @@ class EquivariantTransformer(nn.Module):
             num_heads=num_heads,
             group_size=self.group_size,
             num_sites=num_sites,
-            dropout=dropout,
             d_hidden=d_model,
+        )
+        
+        # Layer norm and feedforward after lifting
+        self.layer_norm_lifting = nn.LayerNorm(d_model)
+        self.ff_lifting = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.SiLU(),
+            nn.Linear(d_ff, d_model),
         )
         
         # Equivariant attention layers
@@ -66,7 +76,19 @@ class EquivariantTransformer(nn.Module):
                 num_heads=num_heads,
                 group_size=self.group_size,
                 num_sites=num_sites,
-                dropout=dropout,
+            )
+            for _ in range(num_layers)
+        ])
+        
+        # Layer norms and feedforward networks for attention layers
+        self.layer_norms_attn = nn.ModuleList([
+            nn.LayerNorm(d_model) for _ in range(num_layers)
+        ])
+        self.ff_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                nn.SiLU(),
+                nn.Linear(d_ff, d_model),
             )
             for _ in range(num_layers)
         ])
@@ -95,10 +117,22 @@ class EquivariantTransformer(nn.Module):
         # [B, n, d_model] -> [B, n, |H|, d_model]
         X_eq = self.lifting(X, self.spatial_diff, self.group_action_space)
         
+        # Feedforward after lifting
+        X_norm = self.layer_norm_lifting(X_eq)
+        X_ff = self.ff_lifting(X_norm)
+        X_eq = X_eq + X_ff  # Residual connection
+        
         # Equivariant attention layers
         X_att = X_eq
-        for layer in self.attention_layers:
-            X_att = layer(X_att, self.spatial_diff, self.group_mult)
+        for i, layer in enumerate(self.attention_layers):
+            # Attention
+            X_att_out = layer(X_att, self.spatial_diff, self.group_mult)
+            X_att = X_att + X_att_out  # Residual connection
+            
+            # Feedforward
+            X_norm = self.layer_norms_attn[i](X_att)
+            X_ff = self.ff_layers[i](X_norm)
+            X_att = X_att + X_ff  # Residual connection
         
         # Pooling + output
         output = self.output_layer(X_att)

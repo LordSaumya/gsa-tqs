@@ -12,7 +12,6 @@ class GroupAttention(nn.Module):
         num_heads: int,
         group_size: int,
         num_sites: int,
-        dropout: float = 0.1,
         relative_bias_init_std: float = 0.02,
     ):
         super().__init__()
@@ -35,7 +34,6 @@ class GroupAttention(nn.Module):
         nn.init.normal_(self.rho_group.weight, mean=0.0, std=relative_bias_init_std)
         
         self.layernorm = nn.LayerNorm(d_model)
-        self.dropout = nn.Dropout(dropout)
         self.scale = math.sqrt(self.d_k)
     
     def forward(
@@ -102,6 +100,5 @@ class GroupAttention(nn.Module):
         O = O.reshape(batch_size, n, h, d_model)
 
         O = self.W_o(O)
-        O = self.dropout(O)
 
         return O + residual

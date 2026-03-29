@@ -19,7 +19,6 @@ class AttentionConfig(TypedDict, total=False):
     d_k: int  # Key/query dimension per head (typically d_model / num_heads)
     d_v: int  # Value dimension per head (typically d_model / num_heads)
     d_hidden: int  # Intermediate hidden dimension (same as d_model typically)
-    dropout: float
     attention_type: str  # "lifting" or "group"
 
 
@@ -46,7 +45,6 @@ DEFAULT_ATTENTION_CONFIG: AttentionConfig = {
     "d_k": 128 // 4,  # = 32
     "d_v": 128 // 4,  # = 32
     "d_hidden": 128,
-    "dropout": 0.1,
     "attention_type": "lifting",
 }
 

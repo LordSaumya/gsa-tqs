@@ -13,7 +13,6 @@ class LiftingAttention(nn.Module):
         num_heads: int,
         group_size: int,
         num_sites: int,
-        dropout: float = 0.1,
         d_hidden: Optional[int] = None,
         relative_bias_init_std: float = 0.02,
     ):
@@ -43,7 +42,6 @@ class LiftingAttention(nn.Module):
         self.rho_lift = nn.Embedding(num_distances, num_heads)
         nn.init.normal_(self.rho_lift.weight, mean=0.0, std=relative_bias_init_std)
         
-        self.dropout = nn.Dropout(dropout)
         self.scale = math.sqrt(self.d_k)
     
     def forward(
@@ -76,8 +74,7 @@ class LiftingAttention(nn.Module):
         
         # Softmax over key dimension
         A = torch.softmax(A, dim=3)
-        A = self.dropout(A)  # [B, |H|, n, n, M]
-        
+                
         # Aggregate with V
         # A: [B, |H|, n, n, M] -> [B, |H|, M, n, n]
         # V: [B, n, M, d_v] -> [B, M, n, d_v] -> [B, 1, M, n, d_v] for broadcast

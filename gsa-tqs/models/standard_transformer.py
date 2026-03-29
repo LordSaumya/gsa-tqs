@@ -19,8 +19,8 @@ class StandardTransformer(nn.Module):
         num_heads: int = 4,
         output_mode: str = "polar",
         phase_init_zero: bool = True,
-        dropout: float = 0.1,
         d_ff: Optional[int] = None,
+        pe_mode: int = 1,
     ):
         super().__init__()
         
@@ -29,18 +29,38 @@ class StandardTransformer(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.output_mode = output_mode
+        self.pe_mode = pe_mode
         
         # Input embedding layer (same as EquivariantTransformer)
         self.state_embedding = nn.Linear(1, d_model)
         
-        # Absolute positional encoding
-        self.positional_encoding = nn.Parameter(torch.randn(1, num_sites, d_model))
+        # Positional encoding (mode-dependent)
+        # pe_mode: 0 = no PE, 1 = absolute PE, 2 = relative PE
+        if pe_mode == 1:
+            # Absolute positional encoding
+            self.positional_encoding = nn.Parameter(torch.randn(1, num_sites, d_model))
+        elif pe_mode == 2:
+            # Relative positional encoding - learnable embeddings for relative distances
+            max_distance = num_sites - 1
+            self.relative_pos_embedding = nn.Embedding(2 * max_distance + 1, d_model)
+            self.max_distance = max_distance
+        # pe_mode == 0: no positional encoding
+        
+        # Feedforward dimension
+        d_ff = d_ff or (4 * d_model)
+        
+        # Layer norm and feedforward after "lifting"
+        self.layer_norm_lifting = nn.LayerNorm(d_model)
+        self.ff_lifting = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.SiLU(),
+            nn.Linear(d_ff, d_model),
+        )
         
         # Lifting attention layer (acts as parameter-equivalent for LiftingAttention)
         self.lifting_attention = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=num_heads,
-            dropout=dropout,
             batch_first=True,
         )
         
@@ -49,7 +69,6 @@ class StandardTransformer(nn.Module):
             nn.MultiheadAttention(
                 embed_dim=d_model,
                 num_heads=num_heads,
-                dropout=dropout,
                 batch_first=True,
             )
             for _ in range(num_layers)
@@ -60,6 +79,21 @@ class StandardTransformer(nn.Module):
             nn.LayerNorm(d_model) for _ in range(num_layers)
         ])
         self.layer_norm_lifting = nn.LayerNorm(d_model)
+
+        # Feedforward networks after attention
+        self.ff_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                nn.SiLU(),
+                nn.Linear(d_ff, d_model),
+            )
+            for _ in range(num_layers)
+        ])
+        
+        # Layer norms for feedforward
+        self.layer_norms_ff = nn.ModuleList([
+            nn.LayerNorm(d_model) for _ in range(num_layers)
+        ])
         
         # Output layer (same as EquivariantTransformer)
         self.output_layer = InvariantPoolAndOutput(
@@ -90,23 +124,51 @@ class StandardTransformer(nn.Module):
         # Embed input: [B, n, 1] -> [B, n, d_model]
         X = self.state_embedding(X)
         
-        # Add positional encoding
-        X = X + self.positional_encoding
+        # Apply positional encoding based on mode
+        if self.pe_mode == 1:
+            # Absolute positional encoding
+            X = X + self.positional_encoding
+        elif self.pe_mode == 2:
+            # Relative positional encoding
+            # Compute relative distances between all positions and aggregate embeddings
+            B, N, D = X.shape
+            positions = torch.arange(N, device=X.device)
+            relative_positions = positions.unsqueeze(1) - positions.unsqueeze(0)  # [N, N]
+            relative_positions = torch.clamp(relative_positions, -self.max_distance, self.max_distance)
+            relative_positions = relative_positions + self.max_distance  # Shift to positive indices
+            
+            rel_pos_embeddings = self.relative_pos_embedding(relative_positions)  # [N, N, D]
+            # Aggregate relative position embeddings (mean across all relative positions)
+            rel_pos_enc = rel_pos_embeddings.mean(dim=1, keepdim=False).unsqueeze(0)  # [1, N, D]
+            X = X + rel_pos_enc
+        # pe_mode == 0: no positional encoding applied
         
-        # Apply lifting attention
+        # Apply "lifting" attention
         X_norm = self.layer_norm_lifting(X)
         lifting_output, _ = self.lifting_attention(X_norm, X_norm, X_norm)
         X = X + lifting_output  # Residual connection
         
+        # Feedforward after lifting attention
+        X_norm = self.layer_norm_lifting(X)
+        X_ff = self.ff_lifting(X_norm)
+        X = X + X_ff  # Residual connection
+        
         # Standard transformer layers with residual connections
-        for attn_layer, ln_attn in zip(
+        for attn_layer, ln_attn, ff_layer, ln_ff in zip(
             self.attention_layers,
             self.layer_norms_attn,
+            self.ff_layers,
+            self.layer_norms_ff,
         ):
             # Self-attention with pre-normalization (pre-LN transformer)
             X_norm = ln_attn(X)
             attn_output, _ = attn_layer(X_norm, X_norm, X_norm)
             X = X + attn_output  # Residual connection
+            
+            # Feedforward sublayer
+            X_norm = ln_ff(X)
+            X_ff = ff_layer(X_norm)
+            X = X + X_ff  # Residual connection
         
         # Pooling + output
         output = self.output_layer(X.unsqueeze(2))  # Add group dimension for compatibility
