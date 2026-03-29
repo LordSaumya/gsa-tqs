@@ -126,8 +126,7 @@ class EquivariantTransformer(nn.Module):
         X_att = X_eq
         for i, layer in enumerate(self.attention_layers):
             # Attention
-            X_att_out = layer(X_att, self.spatial_diff, self.group_mult)
-            X_att = X_att + X_att_out  # Residual connection
+            X_att = layer(X_att, self.spatial_diff, self.group_mult)
             
             # Feedforward
             X_norm = self.layer_norms_attn[i](X_att)
