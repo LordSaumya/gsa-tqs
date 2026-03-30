@@ -1,13 +1,32 @@
 import torch
 import torch.optim as optim
 from typing import Dict, List, Tuple, Optional
-import pennylane as qml
 import wandb
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import eigsh
+from torch.amp import autocast, GradScaler
 
-from hamiltonian import build_pennylane_tfim, build_hamiltonian_dense
+from hamiltonian import build_pennylane_tfim, hamiltonian_to_torch_sparse
 from models.equivariant_transformer import EquivariantTransformer
 from models.standard_transformer import StandardTransformer
 from losses import ExactRayleighQuotientLoss, BaseVMCLoss
+
+
+def compute_ground_state_energy_from_sparse(H_sparse: torch.Tensor) -> float:
+    """
+    Compute the ground state energy directly from sparse Hamiltonian matrix.
+    """
+    # Convert PyTorch sparse CSR tensor to scipy sparse matrix
+    crow_indices = H_sparse.crow_indices().cpu().numpy()
+    col_indices = H_sparse.col_indices().cpu().numpy()
+    values = H_sparse.values().cpu().numpy()
+    
+    H_scipy = csr_matrix((values, col_indices, crow_indices), shape=H_sparse.shape)
+    
+    # Compute only the ground state (lowest eigenvalue) using sparse eigenvalue solver
+    eigenvalues, _ = eigsh(H_scipy, k=1, which='SA')
+    
+    return float(eigenvalues[0])
 
 
 def initialise_model(
@@ -16,19 +35,21 @@ def initialise_model(
     num_layers: int = 2,
     num_heads: int = 4,
     device: str = "cpu",
+    lattice_type: str = "1d_dihedral",
+    **lattice_kwargs,
 ) -> Tuple[torch.nn.Module, int]:
     """
     Initialise the equivariant neural network ansatz.
     """
     model = EquivariantTransformer(
-        lattice_type="1d_dihedral",
+        lattice_type=lattice_type,
         num_sites=n_sites,
         d_model=d_model,
         num_layers=num_layers,
         num_heads=num_heads,
         output_mode="polar",
         phase_init_zero=True,
-        dropout=0.1,
+        **lattice_kwargs,
     ).to(device)
     
     num_params = sum(p.numel() for p in model.parameters())
@@ -41,34 +62,39 @@ def initialise_ablation_models(
     num_layers: int = 2,
     num_heads: int = 4,
     device: str = "cpu",
+    lattice_type: str = "1d_dihedral",
+    **lattice_kwargs,
 ) -> Tuple[torch.nn.Module, torch.nn.Module, int, int]:
     """
-    Initialise both equivariant and standard transformer models for ablation study.
-    
-    Returns:
-        Tuple of (equivariant_model, standard_model, eq_num_params, std_num_params)
+    Initialise models for ablation study.
     """
+
+    # Standard model (same hyperparameters, uses actual number of sites)
+    if lattice_type == "2d_square":
+        actual_n_sites = n_sites * n_sites
+    else:
+        actual_n_sites = n_sites
+
     # Equivariant model
     eq_model = EquivariantTransformer(
-        lattice_type="1d_dihedral",
-        num_sites=n_sites,
+        lattice_type=lattice_type,
+        num_sites=actual_n_sites,
         d_model=d_model,
         num_layers=num_layers,
         num_heads=num_heads,
         output_mode="polar",
         phase_init_zero=True,
-        dropout=0.1,
+        **lattice_kwargs,
     ).to(device)
     
-    # Standard model (same hyperparameters)
     std_model = StandardTransformer(
-        num_sites=n_sites,
+        num_sites=actual_n_sites,
         d_model=d_model,
         num_layers=num_layers,
         num_heads=num_heads,
         output_mode="polar",
         phase_init_zero=True,
-        dropout=0.1,
+        pe_mode=1 # Absolute positional encoding
     ).to(device)
     
     eq_num_params = sum(p.numel() for p in eq_model.parameters())
@@ -90,7 +116,7 @@ def train_vmc(
     ground_state_energy: float = None,
 ) -> Dict[str, List[float]]:
     """
-    Run the Variational Monte Carlo optimisation loop. Can switch between exact and MCMC evaluation by swapping loss_fn and H_context.
+    Run VMC optimisation loop. Can switch between exact and MCMC evaluation by swapping loss_fn and H_context.
     """
     model.train()
     
@@ -101,26 +127,27 @@ def train_vmc(
         "grad_norm": [],
     }
     
+    scaler = GradScaler('cuda')
+    
     for step in range(steps):
         optimiser.zero_grad()
         
-        # Forward & backward
-        energy, loss = loss_fn(model, H_context, J_params)
-        loss.backward()
+        with autocast('cuda'):
+            energy, loss = loss_fn(model, H_context, J_params)
         
-        # Compute gradient norm
-        total_grad_norm = 0.0
-        for param in model.parameters():
-            if param.grad is not None:
-                total_grad_norm += torch.norm(param.grad).item() ** 2
-        total_grad_norm = (total_grad_norm) ** 0.5
+        scaler.scale(loss).backward()
         
-        # Gradient clipping
         if gradient_clip_value > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_value)
+            total_grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip_value).item()
+        else:
+            total_grad_norm = 0.0
+            for param in model.parameters():
+                if param.grad is not None:
+                    total_grad_norm += torch.norm(param.grad).item() ** 2
+            total_grad_norm = (total_grad_norm) ** 0.5
         
-        # Update
-        optimiser.step()
+        scaler.step(optimiser)
+        scaler.update()
         
         # Log metrics
         energy_val = energy.item() if isinstance(energy, torch.Tensor) else energy
@@ -169,23 +196,6 @@ def train_vmc_ablation(
 ) -> Tuple[Dict[str, List[float]], Dict[str, List[float]]]:
     """
     Run VMC optimisation for both equivariant and standard transformers simultaneously.
-    
-    Args:
-        eq_model: Equivariant transformer model
-        std_model: Standard transformer model
-        eq_optimiser: Optimizer for equivariant model
-        std_optimiser: Optimizer for standard model
-        loss_fn: Loss function
-        H_context: Hamiltonian tensor
-        J_params: Hamiltonian parameters
-        steps: Number of training steps
-        log_interval: Logging interval
-        device: Device to train on
-        gradient_clip_value: Gradient clipping value
-        ground_state_energy: Ground state energy for error calculation
-    
-    Returns:
-        Tuple of (eq_history, std_history)
     """
     eq_model.train()
     std_model.train()
@@ -204,28 +214,29 @@ def train_vmc_ablation(
         "grad_norm": [],
     }
     
+    eq_scaler = GradScaler('cuda')
+    std_scaler = GradScaler('cuda')
+    
     for step in range(steps):
         eq_optimiser.zero_grad()
         
-        # Forward & backward
-        eq_energy, eq_loss = loss_fn(eq_model, H_context, J_params)
-        eq_loss.backward()
+        with autocast('cuda'):
+            eq_energy, eq_loss = loss_fn(eq_model, H_context, J_params)
         
-        # Compute gradient norm
-        eq_grad_norm = 0.0
-        for param in eq_model.parameters():
-            if param.grad is not None:
-                eq_grad_norm += torch.norm(param.grad).item() ** 2
-        eq_grad_norm = (eq_grad_norm) ** 0.5
+        eq_scaler.scale(eq_loss).backward()
         
-        # Gradient clipping
         if gradient_clip_value > 0:
-            torch.nn.utils.clip_grad_norm_(eq_model.parameters(), gradient_clip_value)
+            eq_grad_norm = torch.nn.utils.clip_grad_norm_(eq_model.parameters(), gradient_clip_value).item()
+        else:
+            eq_grad_norm = 0.0
+            for param in eq_model.parameters():
+                if param.grad is not None:
+                    eq_grad_norm += torch.norm(param.grad).item() ** 2
+            eq_grad_norm = (eq_grad_norm) ** 0.5
         
-        # Update
-        eq_optimiser.step()
+        eq_scaler.step(eq_optimiser)
+        eq_scaler.update()
         
-        # Extract values
         eq_energy_val = eq_energy.item() if isinstance(eq_energy, torch.Tensor) else eq_energy
         eq_loss_val = eq_loss.item() if isinstance(eq_loss, torch.Tensor) else eq_loss
         
@@ -236,25 +247,23 @@ def train_vmc_ablation(
         
         std_optimiser.zero_grad()
         
-        # Forward & backward
-        std_energy, std_loss = loss_fn(std_model, H_context, J_params)
-        std_loss.backward()
+        with autocast('cuda'):
+            std_energy, std_loss = loss_fn(std_model, H_context, J_params)
         
-        # Compute gradient norm
-        std_grad_norm = 0.0
-        for param in std_model.parameters():
-            if param.grad is not None:
-                std_grad_norm += torch.norm(param.grad).item() ** 2
-        std_grad_norm = (std_grad_norm) ** 0.5
+        std_scaler.scale(std_loss).backward()
         
-        # Gradient clipping
         if gradient_clip_value > 0:
-            torch.nn.utils.clip_grad_norm_(std_model.parameters(), gradient_clip_value)
+            std_grad_norm = torch.nn.utils.clip_grad_norm_(std_model.parameters(), gradient_clip_value).item()
+        else:
+            std_grad_norm = 0.0
+            for param in std_model.parameters():
+                if param.grad is not None:
+                    std_grad_norm += torch.norm(param.grad).item() ** 2
+            std_grad_norm = (std_grad_norm) ** 0.5
         
-        # Update
-        std_optimiser.step()
+        std_scaler.step(std_optimiser)
+        std_scaler.update()
         
-        # Extract values
         std_energy_val = std_energy.item() if isinstance(std_energy, torch.Tensor) else std_energy
         std_loss_val = std_loss.item() if isinstance(std_loss, torch.Tensor) else std_loss
         
@@ -284,8 +293,8 @@ def train_vmc_ablation(
         # Console logging
         if log_interval > 0 and (step + 1) % log_interval == 0:
             print(f"Step {step + 1}/{steps}")
-            print(f"  Equivariant  | Energy: {eq_energy_val:.6f} | Loss: {eq_loss_val:.6f} | Grad: {eq_grad_norm:.6f}")
-            print(f"  Standard     | Energy: {std_energy_val:.6f} | Loss: {std_loss_val:.6f} | Grad: {std_grad_norm:.6f}")
+            print(f"  Equivariant  | Energy: {eq_energy_val:.6f} | Grad: {eq_grad_norm:.6f}")
+            print(f"  Standard     | Energy: {std_energy_val:.6f} | Grad: {std_grad_norm:.6f}")
     
     return eq_history, std_history
 
@@ -304,6 +313,7 @@ def optimise_vmc(
     wandb_project: str = "gsa-tqs",
     wandb_entity: str = None,
     ground_state_energy: float = None,
+    lattice_type: str = "1d_dihedral",
 ):
     """
     Initialise model and run VMC optimisation for the given Hamiltonian.
@@ -336,19 +346,25 @@ def optimise_vmc(
             tags=["vmc", "1d-tfim"],
         )
     
-    # Build Hamiltonian
-    H_qml = build_pennylane_tfim(n_sites, J, Omega, pbc=True)
-    H_tensor = build_hamiltonian_dense(H_qml, device=device)
+    # Calculate actual number of sites based on lattice type
+    if lattice_type == "1d_dihedral":
+        actual_n_sites = n_sites
+    elif lattice_type == "2d_square":
+        actual_n_sites = n_sites * n_sites
+    else:
+        raise ValueError(f"Unsupported lattice_type: {lattice_type}")
+    
+    # Build sparse Hamiltonian
+    H_qml = build_pennylane_tfim(n_sites, J, Omega, pbc=True, lattice_type=lattice_type)
+    H_tensor_sparse = hamiltonian_to_torch_sparse(H_qml, device=device)
     
     # Calculate ground state energy if not provided
     if ground_state_energy is None:
-        # Move to CPU for eigenvalue calculation if needed
-        H_cpu = H_tensor.cpu() if H_tensor.device.type == 'cuda' else H_tensor
-        eigenvalues = torch.linalg.eigvalsh(H_cpu)
-        ground_state_energy = eigenvalues[0].item()
-        print(f"Calculated ground state energy: {ground_state_energy:.6f}")
+        H_sparse_cpu = hamiltonian_to_torch_sparse(H_qml, device="cpu")
+        ground_state_energy = compute_ground_state_energy_from_sparse(H_sparse_cpu)
+        print(f"Calculated ground state energy: {ground_state_energy:.10f}")
     else:
-        print(f"Using provided ground state energy: {ground_state_energy:.6f}")
+        print(f"Using provided ground state energy: {ground_state_energy:.10f}")
     
     # Log ground state energy to wandb
     if use_wandb:
@@ -361,10 +377,11 @@ def optimise_vmc(
         num_layers=num_layers,
         num_heads=num_heads,
         device=device,
+        lattice_type=lattice_type,
     )
     
     # Setup loss and optimiser
-    loss_fn = ExactRayleighQuotientLoss(n_sites=n_sites, device=device)
+    loss_fn = ExactRayleighQuotientLoss(n_sites=actual_n_sites, device=device)
     optimiser = optim.Adam(model.parameters(), lr=learning_rate)
     J_params = torch.tensor([[J, Omega]], device=device, dtype=torch.float32)
     
@@ -373,7 +390,7 @@ def optimise_vmc(
         model=model,
         optimiser=optimiser,
         loss_fn=loss_fn,
-        H_context=H_tensor,
+        H_context=H_tensor_sparse,
         J_params=J_params,
         steps=steps,
         log_interval=max(1, steps // 20),
@@ -400,28 +417,11 @@ def optimise_vmc_ablation(
     wandb_project: str = "gsa-tqs",
     wandb_entity: str = None,
     ground_state_energy: float = None,
+    lattice_type: str = "1d_dihedral",
+    log_interval: int = 250,
 ):
     """
     Initialise both equivariant and standard models and run VMC optimisation together for ablation study.
-    
-    Args:
-        n_sites: Number of sites
-        J: Ising coupling strength
-        Omega: Transverse field strength
-        d_model: Model embedding dimension
-        num_layers: Number of transformer layers
-        num_heads: Number of attention heads
-        learning_rate: Learning rate
-        steps: Number of training steps
-        device: Device to train on
-        seed: Random seed
-        use_wandb: Whether to use W&B logging
-        wandb_project: W&B project name
-        wandb_entity: W&B entity name
-        ground_state_energy: Ground state energy (computed if not provided)
-    
-    Returns:
-        Tuple of (eq_model, std_model, eq_history, std_history, eq_num_params, std_num_params, ground_state_energy)
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -451,18 +451,25 @@ def optimise_vmc_ablation(
             tags=["vmc", "1d-tfim", "ablation"],
         )
     
-    # Build Hamiltonian
-    H_qml = build_pennylane_tfim(n_sites, J, Omega, pbc=True)
-    H_tensor = build_hamiltonian_dense(H_qml, device=device)
+    # Calculate actual number of sites based on lattice type
+    if lattice_type == "1d_dihedral":
+        actual_n_sites = n_sites
+    elif lattice_type == "2d_square":
+        actual_n_sites = n_sites * n_sites
+    else:
+        raise ValueError(f"Unsupported lattice_type: {lattice_type}")
+    
+    # Build sparse Hamiltonian
+    H_qml = build_pennylane_tfim(n_sites, J, Omega, pbc=True, lattice_type=lattice_type)
+    H_tensor_sparse = hamiltonian_to_torch_sparse(H_qml, device=device)
     
     # Calculate ground state energy if not provided
     if ground_state_energy is None:
-        H_cpu = H_tensor.cpu() if H_tensor.device.type == 'cuda' else H_tensor
-        eigenvalues = torch.linalg.eigvalsh(H_cpu)
-        ground_state_energy = eigenvalues[0].item()
-        print(f"Calculated ground state energy: {ground_state_energy:.6f}")
+        H_sparse_cpu = hamiltonian_to_torch_sparse(H_qml, device="cpu")
+        ground_state_energy = compute_ground_state_energy_from_sparse(H_sparse_cpu)
+        print(f"Calculated ground state energy: {ground_state_energy:<15.10f}")
     else:
-        print(f"Using provided ground state energy: {ground_state_energy:.6f}")
+        print(f"Using provided ground state energy: {ground_state_energy:<15.10f}")
     
     # Log ground state energy to wandb
     if use_wandb:
@@ -475,16 +482,20 @@ def optimise_vmc_ablation(
         num_layers=num_layers,
         num_heads=num_heads,
         device=device,
+        lattice_type=lattice_type,
     )
     
     print(f"Equivariant model: {eq_num_params} parameters")
     print(f"Standard model: {std_num_params} parameters")
     
     # Setup loss and optimisers
-    loss_fn = ExactRayleighQuotientLoss(n_sites=n_sites, device=device)
+    loss_fn = ExactRayleighQuotientLoss(n_sites=actual_n_sites, device=device)
     eq_optimiser = optim.Adam(eq_model.parameters(), lr=learning_rate)
     std_optimiser = optim.Adam(std_model.parameters(), lr=learning_rate)
     J_params = torch.tensor([[J, Omega]], device=device, dtype=torch.float32)
+
+    if log_interval == 0:
+        log_interval = 2 * steps  # Disable logging if set to 0
     
     # Train both models simultaneously
     eq_history, std_history = train_vmc_ablation(
@@ -493,13 +504,55 @@ def optimise_vmc_ablation(
         eq_optimiser=eq_optimiser,
         std_optimiser=std_optimiser,
         loss_fn=loss_fn,
-        H_context=H_tensor,
+        H_context=H_tensor_sparse,
         J_params=J_params,
         steps=steps,
-        log_interval=max(1, steps // 20),
+        log_interval=log_interval,
         device=device,
         gradient_clip_value=1.0,
         ground_state_energy=ground_state_energy,
     )
     
     return eq_model, std_model, eq_history, std_history, eq_num_params, std_num_params, ground_state_energy
+def evaluate_model(
+    model: torch.nn.Module,
+    n_sites: int,
+    J: float,
+    Omega: float,
+    device: str = "cpu",
+    return_ground_state: bool = False,
+    lattice_type: str = "1d_dihedral",
+) -> Tuple[float, Optional[float]]:
+    """
+    Evaluate a trained model on the TFIM Hamiltonian for a given system size.
+    """
+    model.eval()  # Set to evaluation mode
+    
+    # Calculate actual number of sites
+    if lattice_type == "1d_dihedral":
+        actual_n_sites = n_sites
+    elif lattice_type == "2d_square":
+        actual_n_sites = n_sites * n_sites
+    else:
+        raise ValueError(f"Unsupported lattice_type: {lattice_type}")
+    
+    with torch.no_grad():
+        # Build sparse Hamiltonian for system size
+        H_qml = build_pennylane_tfim(n_sites, J, Omega, pbc=True, lattice_type=lattice_type)
+        H_tensor_sparse = hamiltonian_to_torch_sparse(H_qml, device=device)
+        
+        # Create loss function
+        loss_fn = ExactRayleighQuotientLoss(n_sites=actual_n_sites, device=device)
+        J_params = torch.tensor([[J, Omega]], device=device, dtype=torch.float32)
+        
+        # Compute model energy
+        energy, _ = loss_fn(model, H_tensor_sparse, J_params)
+        energy_val = energy.item()
+        
+        # Compute ground state energy
+        ground_state_energy = None
+        if return_ground_state:
+            H_sparse_cpu = hamiltonian_to_torch_sparse(H_qml, device="cpu")
+            ground_state_energy = compute_ground_state_energy_from_sparse(H_sparse_cpu)
+    
+    return energy_val, ground_state_energy
