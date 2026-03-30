@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
-from typing import Tuple, Union, Optional, Dict, Any
+from typing import Tuple, Union, Dict, Any
 
 
 class BaseVMCLoss(nn.Module, ABC):

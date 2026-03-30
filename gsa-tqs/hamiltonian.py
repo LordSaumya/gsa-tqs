@@ -1,7 +1,6 @@
 import pennylane as qml
 import torch
 import numpy as np
-from typing import Tuple, Optional
 
 def build_pennylane_tfim(
     n_sites: int,
