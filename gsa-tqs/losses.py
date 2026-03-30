@@ -62,6 +62,7 @@ class ExactRayleighQuotientLoss(BaseVMCLoss):
         alpha, phase = model(self.basis, state_indices=J_batch)
         
         Psi = torch.polar(torch.exp(alpha), phase)
+        Psi = Psi.to(dtype=torch.complex128) if H.dtype == torch.float64 else Psi
         
         Psi_conj = torch.conj(Psi)
         norm_sq = torch.dot(Psi_conj, Psi) # Normalisation constant
@@ -135,6 +136,7 @@ class ExactRayleighQuotientLossWithGradNorm(BaseVMCLoss):
         # Forward pass
         alpha, phase = model(self.basis, state_indices=J_batch)
         Psi = torch.polar(torch.exp(alpha.squeeze()), phase.squeeze())
+        Psi = Psi.to(dtype=torch.complex128) if H_sparse.dtype == torch.float64 else Psi
         
         # Normalisation
         Psi_conj = torch.conj(Psi)
