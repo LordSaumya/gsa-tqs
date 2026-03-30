@@ -28,11 +28,12 @@ class EquivariantTransformer(nn.Module):
     ):
         """
         Initialise EquivariantTransformer.
+        For 1d_dihedral: num_sites is the actual number of sites.
+        For 2d_square: num_sites is the side length (actual sites = num_sites^2).
         """
         super().__init__()
         
         self.lattice_type = lattice_type
-        self.num_sites = num_sites
         self.d_model = d_model
         self.num_layers = num_layers
         self.output_mode = output_mode
@@ -41,10 +42,22 @@ class EquivariantTransformer(nn.Module):
         # Feedforward dimension
         d_ff = d_ff or (4 * d_model)
         
+        # Calculate actual number of sites based on lattice type
+        if lattice_type == "1d_dihedral":
+            actual_num_sites = num_sites
+            lattice_reg_kwargs = {"n": num_sites, **lattice_kwargs}
+        elif lattice_type == "2d_square":
+            actual_num_sites = num_sites * num_sites
+            lattice_reg_kwargs = {"n": num_sites, **lattice_kwargs}
+        else:
+            raise ValueError(f"Unsupported lattice_type: {lattice_type}")
+        
+        self.num_sites = actual_num_sites
+        
         # Lattice buffer registry
         self.lattice_registry = LatticeBufferRegistry(
             lattice_type=lattice_type,
-            **{"n": num_sites, **lattice_kwargs}
+            **lattice_reg_kwargs
         )
         config = self.lattice_registry.get_lattice_config()
         self.group_size = config["group_size"]
@@ -57,7 +70,7 @@ class EquivariantTransformer(nn.Module):
             d_model=d_model,
             num_heads=num_heads,
             group_size=self.group_size,
-            num_sites=num_sites,
+            num_sites=actual_num_sites,
             d_hidden=d_model,
         )
         
@@ -75,7 +88,7 @@ class EquivariantTransformer(nn.Module):
                 d_model=d_model,
                 num_heads=num_heads,
                 group_size=self.group_size,
-                num_sites=num_sites,
+                num_sites=actual_num_sites,
             )
             for _ in range(num_layers)
         ])
