@@ -61,6 +61,9 @@ PHASE_INIT_VALUE: float = 0.0
 RELATIVE_BIAS_INIT_STD: float = 0.02
 AMPLITUDE_INIT_STD: float = 0.02
 
+DEFAULT_HAMILTONIAN_DTYPE: torch.dtype = torch.float64
+"""Default dtype for Hamiltonians. Using float64 for real-valued Hamiltonians (X and Z operators only)."""
+
 def validate_model_config(config: ModelConfig) -> None:
     """
     Validate model configuration for consistency and reasonableness.
